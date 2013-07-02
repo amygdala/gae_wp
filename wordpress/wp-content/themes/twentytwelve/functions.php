@@ -454,21 +454,52 @@ add_action( 'customize_preview_init', 'twentytwelve_customize_preview_js' );
 
 require_once 'google/appengine/api/taskqueue/PushTask.php';
 use \google\appengine\api\taskqueue\PushTask;
+require_once( ABSPATH . 'tw-config.php' );
+
+// when a scheduled post is created (with 'future' status), schedule a push task the appropriate
+// number of seconds into the future, to publish it.
+function schedulePublishTask($post_id) {
+	syslog(LOG_DEBUG, "in schedulePublishTask");
+	$post = get_post($post_id);
+	// syslog(LOG_DEBUG, "got post " . print_r($post, true));
+	$post_status = get_post_status( $post );
+	syslog(LOG_DEBUG, "post status: $post_status");
+	if ($post_status == 'future') {
+		$now = time();
+		$post_time = strtotime($post->post_date_gmt);
+		$seconds_until_post = $post_time - $now;  // figure out how many seconds until the post should be published
+		$max_seconds = $now + PushTask::MAX_DELAY_SECONDS - 60;  //subtract a minute from the max allowed delay to be cautious
+		if ($seconds_until_post > 0 && $seconds_until_post < $max_seconds) {
+			syslog(LOG_DEBUG, "seconds until post: " . $seconds_until_post);
+			syslog(LOG_DEBUG, "creating publish task for $post_id, to run in $seconds_until_post");
+			$task = new PushTask('/publish_task.php',
+				// POST is the default method, so we could leave out the method specification
+				['post_id' => $post_id], ['method' => 'POST', 'delay_seconds' => $seconds_until_post]);
+   			$task_name = $task->add();
+   			syslog(LOG_DEBUG, "finished adding task");
+   		}
+   		else {
+   			syslog(LOG_WARNING, "Date out of bounds; not scheduling task for date: " . $post->post_date_gmt);
+   		}
+	}
+}
+add_action('save_post', 'schedulePublishTask');
 
 
+// launch a task to notify a list of people when a post has been published.
+// This task in turn will launch a task for each individual's notification.
 function wpr_updateNotification($post_id) {
     $post = get_post($post_id);
     $author = get_userdata($post->post_author);
     $plink = post_permalink($post_id);
 
     $message = $author->display_name."'s post, '".$post->post_title."', has just been published or updated!\n" . $plink;
-    $people = array(
-    	"+61458558901" => "Amy",
-    	"+61478472595" => "Amy Jo",
-    );
-   syslog(LOG_DEBUG, "message: $message");
-   $task = new PushTask('/twilio_sms.php', ['message' => $message, 'people' => $people], ['method' => 'POST']);
-   $task_name = $task->add();
+    $people = get_SMS_array();  // get the list of the people we're going to notify.
+    syslog(LOG_DEBUG, "message: $message");
+    $task = new PushTask('/twilio_sms.php',
+		// POST is the default method, so we could leave out the method specification
+    	['message' => $message, 'people' => $people], ['method' => 'POST']);
+    $task_name = $task->add();
 }
 add_action('publish_post', 'wpr_updateNotification');
 
